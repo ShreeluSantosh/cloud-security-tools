@@ -1,2 +1,2 @@
-# exposed-s3-bucket-scanner
+# exposed-cloud-storage-scanner
 Work in progress
