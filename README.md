@@ -1,2 +1,4 @@
-# exposed-cloud-storage-scanner
-Work in progress
+# cloud-security-tools
+A repository of scripts and tools for AWS
+
+Work in progress...
