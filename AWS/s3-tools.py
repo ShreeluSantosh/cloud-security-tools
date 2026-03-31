@@ -21,7 +21,8 @@ import boto3
 from botocore.exceptions import ClientError
 
 class S3Basics:
-    """Base class for S3 tools, providing common functionality for credential management and logging."""
+    """Base class for S3 tools, providing common functionality for credential 
+    management and logging."""
 
     def __init__(self):
         """Initialize the S3Basics class."""
@@ -29,7 +30,7 @@ class S3Basics:
         self.aws_secret_access_key = None
         self.s3_client = None
         self.logger = None
-    
+
     def _setup_logging(self, name='', level=logging.INFO, format_string=None):
         """
         Set up logging for the S3 tools.
@@ -39,63 +40,73 @@ class S3Basics:
             level (int): Logging level, e.g. logging.INFO (default: logging.INFO)
             format_string (str): Log message format (default: "%(asctime)s %(name)s [%(levelname)s] %(message)s")
         """
-        logging.basicConfig(level=level)
-        self.logger = logging.getLogger(name)
+        self.logger = logging.getLogger(name or __name__)
+        self.logger.setLevel(level)
+
+        if not self.logger.handlers:
+            handler = logging.StreamHandler()
+            self.logger.addHandler(handler)
+
         if format_string:
             formatter = logging.Formatter(format_string)
-            self.logger.handlers[0].setFormatter(formatter)
+            for handler in self.logger.handlers:
+                handler.setFormatter(formatter)
+
+        self.logger.propagate = False
 
     def _fetch_credentials(self):
         """
         Fetch AWS credentials from a configuration file or environment variables.
         """
-        # read credentials from a config file (e.g., s3-config.json)
-        try:
-            # first check if the s3-config.json file exists and contains the necessary credentials
-            self.logger.info("Attempting to fetch AWS credentials from environment variables.")
-            if not os.path.exists('s3-config.json'):
-                self.aws_access_key_id = os.getenv('AWS_ACCESS_KEY_ID')
-                self.aws_secret_access_key = os.getenv('AWS_SECRET_ACCESS_KEY')
-                if not self.aws_access_key_id or not self.aws_secret_access_key:
-                    self.logger.error("AWS credentials not found in environment variables.")
+        if self.logger is None:
+            self._setup_logging("s3-tools")
 
-            self.logger.info("Attempting to fetch AWS credentials from configuration file.")
-            with open('s3-config.json', 'r') as f:
-                config = json.load(f)
-                self.aws_access_key_id = config.get('aws_access_key_id')
-                self.aws_secret_access_key = config.get('aws_secret_access_key')
-                if not self.aws_access_key_id or not self.aws_secret_access_key:
-                    self.logger.error("AWS credentials not found in configuration file.")
-        except FileNotFoundError:
-            self.logger.error("Configuration file not found. Please provide AWS credentials.")
+        self.logger.info("Attempting to fetch AWS credentials.")
+
+        config_path = 's3-config.json'
+        config = {}
+
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+            except (FileNotFoundError, json.JSONDecodeError) as exc:
+                self.logger.error("Unable to read configuration file: %s", exc)
+
+        self.aws_access_key_id = config.get('aws_access_key_id') or os.getenv('AWS_ACCESS_KEY_ID')
+        self.aws_secret_access_key = config.get('aws_secret_access_key') or os.getenv('AWS_SECRET_ACCESS_KEY')
+
+        if not self.aws_access_key_id or not self.aws_secret_access_key:
+            self.logger.warning(
+                "AWS credentials were not found in s3-config.json or environment variables; "
+                "boto3 will use the default credential chain if available."
+            )
 
     def setup(self):
         """
         Set up logging for the S3 tools and create an S3 client using the fetched credentials.
         """
         self._setup_logging(
-            "s3-tools", 
-            logging.INFO, 
+            "s3-tools",
+            logging.INFO,
             "%(asctime)s %(name)s [%(levelname)s] %(message)s"
+        )
+        self._fetch_credentials()
+
+        client_kwargs = {}
+        if self.aws_access_key_id and self.aws_secret_access_key:
+            client_kwargs.update(
+                {
+                    'aws_access_key_id': self.aws_access_key_id,
+                    'aws_secret_access_key': self.aws_secret_access_key,
+                }
             )
-        try:
-            self._fetch_credentials()
-            self.s3_client = boto3.client(
-                's3', 
-                aws_access_key_id=self.aws_access_key_id, 
-                aws_secret_access_key=self.aws_secret_access_key
-                )
-        except Exception as e:
-            self.logger.error("Error setting up S3 client: {%s}", e)
+
+        self.s3_client = boto3.client('s3', **client_kwargs)
         
 
 class S3PublicBuckets(S3Basics):
     """Class to check if S3 buckets are publicly accessible."""
-
-    def __init__(self):
-        """Initialize the S3PublicBuckets class."""
-        super().__init__()
-
 
     def check_s3_bucket_public_access(self, bucket_names_list):
         """
@@ -107,26 +118,29 @@ class S3PublicBuckets(S3Basics):
         Returns:
             Dictionary with bucket names and their public access status
         """
-        self._fetch_credentials()
-        if not self.aws_access_key_id or not self.aws_secret_access_key:
-            self.logger.error("Failed to fetch AWS credentials.")
-            return {}
-        
+        if self.logger is None or self.s3_client is None:
+            self.setup()
+        else:
+            self._fetch_credentials()
+
         results = {}
 
         for bucket_name in bucket_names_list:
-            self.logger.info("Checking public access for bucket: {%s}", bucket_name)
+            self.logger.info("Checking public access for bucket: %s", bucket_name)
             try:
                 public_access_block = self.s3_client.get_public_access_block(
                     Bucket=bucket_name
                 )
 
-                config = public_access_block['PublicAccessBlockConfiguration']
-                is_public = not (
-                    config['BlockPublicAcls'] and
-                    config['BlockPublicPolicy'] and
-                    config['IgnorePublicAcls'] and
-                    config['RestrictPublicBuckets']
+                config = public_access_block.get('PublicAccessBlockConfiguration', {})
+                is_public = not all(
+                    config.get(flag, False)
+                    for flag in (
+                        'BlockPublicAcls',
+                        'BlockPublicPolicy',
+                        'IgnorePublicAcls',
+                        'RestrictPublicBuckets',
+                    )
                 )
 
                 results[bucket_name] = {
@@ -135,7 +149,7 @@ class S3PublicBuckets(S3Basics):
                 }
 
             except ClientError as e:
-                self.logger.error("Error occurred while checking bucket {%s}: {%s}", bucket_name, e)
+                self.logger.error("Error occurred while checking bucket %s: %s", bucket_name, e)
                 results[bucket_name] = {
                     'is_public': None,
                     'status': f'ERROR: {e.response["Error"]["Code"]}'
